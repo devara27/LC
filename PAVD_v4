@@ -1,0 +1,473 @@
+import ee
+import pandas as pd
+import io
+import ipywidgets as widgets
+import ipysheet
+from ipysheet import sheet, row, cell
+from ipyleaflet import Map, DrawControl, CircleMarker, LayerGroup
+from geemap import Map as GeeMap  # For Earth Engine integration
+from IPython.display import display, clear_output, HTML
+import datetime
+import numpy as np
+from ipyfilechooser import FileChooser
+import geopandas as gpd
+from shapely.geometry import Point
+import tkinter as tk
+from tkinter import filedialog
+import json
+from ipydatagrid import DataGrid
+
+# Authenticate and initialize Google Earth Engine
+try:
+    ee.Authenticate()
+    ee.Initialize()
+    print("Earth Engine initialized successfully.")
+except Exception as e:
+    print("⚠ Earth Engine initialization failed:", str(e))
+
+# -------------------------------
+# 🌍 UI PANEL CREATION
+# -------------------------------
+
+# 🔹 Title
+title = widgets.HTML(value="<h3>🌍 Post-Alert Verification Desktop </h3>")
+
+# 🔹 File Upload for CSV
+file_upload = widgets.FileUpload(description="Upload CSV", accept=".csv", multiple=False)
+
+# 🔹 Load Points Button
+load_button = widgets.Button(description="📍 Load Points", button_style="primary")
+
+# 🔹 Open Table Button (Pop-up for CSV)
+open_table_button = widgets.Button(description="📋 Open Table")
+
+# 🔹 Save and Export Table Button
+save_export_button = widgets.Button(description="💾 Save/Export Table", button_style="success")
+
+# 🔹 Imagery Selection Dropdown
+image_label = widgets.Label("Select Imagery:")
+image_dropdown = widgets.Dropdown(
+    options=["Sentinel-1", "Sentinel-2", "Dynamic World"], value="Sentinel-2"
+)
+
+# 🔹 Start Date Picker
+start_date_picker = widgets.DatePicker(
+    description="Start Date",
+    value=datetime.date(2020, 7, 1),
+    min=datetime.date(2015, 1, 1),
+    max=datetime.date.today(),
+    disabled=False
+)
+
+# 🔹 End Date Picker
+end_date_picker = widgets.DatePicker(
+    description="End Date",
+    value=datetime.date(2020, 7, 31),
+    min=datetime.date(2015, 1, 1),
+    max=datetime.date.today(),
+    disabled=False
+)
+
+# 🔹 Load Image Button
+load_image_button = widgets.Button(description="🖼️ Load Image", button_style="info")
+
+# 🔹 Select Features Button (Standalone)
+select_features_button = widgets.Button(description="🔍 Select Features", button_style="info")
+
+# -------------------------------
+# 🗺️ CREATE AN INTERACTIVE MAP
+# -------------------------------
+# Initialize the map
+m = GeeMap(center=[0, 0], zoom=2)  # Use geemap for Earth Engine integration
+
+#Remove GeeMap's automatic draw control
+m.remove_control(m.draw_control)
+
+# Add a drawing control to the map
+draw_control = DrawControl(
+    polygon={"shapeOptions": {"color": "#6bc5b3"}},
+    rectangle={"shapeOptions": {"color": "#6bc5b3"}},
+    circlemarker={"shapeOptions": {"color": "#6bc5b3"}},
+    marker={"shapeOptions": {"color": "#6bc5b3"}},
+    polyline={"shapeOptions": {"color": "#6bc5b3"}},
+)
+m.add_control(draw_control)
+
+# -------------------------------
+# 📌 FUNCTION TO LOAD CSV POINTS FROM LOCAL FILE
+# -------------------------------
+uploaded_points = None  # Placeholder for AOI points
+uploaded_gdf = None  # Placeholder for the uploaded GeoDataFrame
+uploaded_df = None
+sheet = None  # Placeholder for the ipysheet
+rectangle_geom = None
+selected_indices = []  # Store selected row indices
+
+class CustomDataGrid(DataGrid):
+    """
+    Custom DataGrid that allows only modification of selected columns
+    """
+    def __init__(self,*args,**kwargs):
+        self.editable_columns = kwargs.pop('editable_columns')
+        super().__init__(*args,**kwargs)
+        self.on_cell_change(self.on_change)
+        self.original_data = self.data.copy()
+        
+    def on_change(self,e):
+        val = e['value']
+        col = e['column']
+        row = e['row']
+        original_value = self.original_data.iloc[row][col]
+        if col not in self.editable_columns:
+            print (col)
+            if val != original_value:
+                self.set_cell_value_by_index(col, row, original_value)
+
+def load_csv_points(b):
+    global uploaded_points, uploaded_gdf, uploaded_df, sheet
+
+    if not file_upload.value:
+        print("⚠ Please upload a CSV file.")
+        return
+
+    # Read the uploaded CSV file
+    uploaded_file = file_upload.value[0]
+    content = uploaded_file.content
+    uploaded_df = pd.read_csv(io.BytesIO(content))
+
+    # Debug: Print the uploaded DataFrame
+    print("Uploaded DataFrame:")
+    print(uploaded_df)  # Check if the DataFrame is loaded correctly
+
+    # Check if the CSV has the required columns (e.g., 'latitude', 'longitude', 'ID')
+    if 'latitude' not in uploaded_df.columns or 'longitude' not in uploaded_df.columns or 'id' not in uploaded_df.columns:
+        print("⚠ CSV must contain 'latitude', 'longitude', and 'id columns.")
+        return
+
+    # Convert the DataFrame to a GeoDataFrame
+    geometry = [Point(xy) for xy in zip(uploaded_df['longitude'], uploaded_df['latitude'])]
+    uploaded_gdf = gpd.GeoDataFrame(uploaded_df, geometry=geometry)
+
+    # Convert to GeoJSON
+    geojson = json.loads(uploaded_gdf.to_json())
+
+    marker_layer = LayerGroup()
+    
+    for feature in geojson['features']:
+        coords = feature['geometry']['coordinates']
+        lon, lat = coords[0], coords[1]
+    
+        marker = CircleMarker(
+            location=(lat, lon),
+            radius=4,
+            color="red",
+            fill_color="red",
+            fill_opacity=1.0,
+            stroke=False
+        )
+    
+        marker_layer.add_layer(marker)
+
+    m.add_layer(marker_layer)
+    # Add points to the map with red color
+    #m.add_geojson(geojson, layer_name="📍 Uploaded Points")
+
+    # Zoom to the uploaded points
+    m.zoom_to_bounds(uploaded_gdf.total_bounds)
+
+    sheet =CustomDataGrid(uploaded_df, editable=True,  editable_columns=['status'], selection_mode='row')
+
+    with table_output:
+        table_output.clear_output(wait=True)
+        display(sheet)
+
+# Connect button to function
+load_button.on_click(load_csv_points)
+
+# -------------------------------
+# 📋 FUNCTION TO DISPLAY AND EDIT UPLOADED CSV AS A TABLE
+# -------------------------------
+table_output = widgets.Output()  # Placeholder for the table
+
+def open_table(b):
+    global uploaded_points, uploaded_gdf, uploaded_df, sheet
+
+    if not file_upload.value:
+        print("⚠ Please upload a CSV file.")
+        return
+
+    # Read the uploaded CSV file
+    uploaded_file = file_upload.value[0]
+    content = uploaded_file.content
+    uploaded_df = pd.read_csv(io.BytesIO(content))
+
+    # Debug: Print the uploaded DataFrame
+    print("Uploaded DataFrame:")
+    print(uploaded_df)  # Check if the DataFrame is loaded correctly
+
+    # Check if the CSV has the required columns (e.g., 'latitude', 'longitude', 'ID')
+    if 'latitude' not in uploaded_df.columns or 'longitude' not in uploaded_df.columns or 'id' not in uploaded_df.columns:
+        print("⚠ CSV must contain 'latitude', 'longitude', and 'id columns.")
+        return
+
+    # Convert the DataFrame to a GeoDataFrame
+    geometry = [Point(xy) for xy in zip(uploaded_df['longitude'], uploaded_df['latitude'])]
+    uploaded_gdf = gpd.GeoDataFrame(uploaded_df, geometry=geometry)
+
+    # Convert to GeoJSON
+    geojson = json.loads(uploaded_gdf.to_json())
+    
+    sheet =CustomDataGrid(uploaded_df, editable=True,  editable_columns=['status'], selection_mode='row')
+
+    with table_output:
+        table_output.clear_output(wait=True)
+        display(sheet)
+
+
+# Connect button to function
+open_table_button.on_click(open_table)
+
+# -------------------------------
+# 💾 FUNCTION TO SAVE AND EXPORT TABLE
+# -------------------------------
+def save_export_table(b):
+    global uploaded_gdf, sheet
+
+    if uploaded_gdf is None or sheet is None:
+        print("⚠ No table data to save or export.")
+        return
+
+    try:
+        # Use Tkinter for file save dialog
+        root = tk.Tk()
+        root.withdraw()  # Hide the root window
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Save table as..."
+        )
+
+        root.destroy()  # Close the hidden Tkinter window
+
+        if not file_path:
+            print("❌ Save cancelled.")
+            return
+
+        # Convert ipysheet to DataFrame
+        grid_data = sheet.data
+        df = pd.DataFrame(grid_data)
+        df.to_csv(file_path, index=False)
+
+
+    except Exception as e:
+        print(f"⚠ Error saving/exporting table: {str(e)}")
+
+
+
+# Connect button to function
+save_export_button.on_click(save_export_table)
+
+# -------------------------------
+# 🛰️ FUNCTION TO LOAD SELECTED IMAGE
+# -------------------------------
+def load_image(b):
+    global rectangle_geom
+    start_date = start_date_picker.value
+    end_date = end_date_picker.value
+
+    # Convert Python dates to Earth Engine dates
+    start_date_ee = ee.Date.fromYMD(start_date.year, start_date.month, start_date.day)
+    end_date_ee = ee.Date.fromYMD(end_date.year, end_date.month, end_date.day)
+
+    data_source = image_dropdown.value
+    
+    # Select Image Collection
+    if data_source == "Sentinel-1":
+        image_collection = ee.ImageCollection("COPERNICUS/S1_GRD") \
+            .filterDate(start_date_ee, end_date_ee)  \
+            .filter(ee.Filter.eq('instrumentMode', 'IW')) \
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')) \
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')) \
+            .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')) 
+        vv = composite.select('VV')
+        vh = composite.select('VH')
+        #Compute VV/VH ratio (avoid division by zero is handled internally by GEE)
+        ratio = vv.divide(vh).rename('VVVH')
+        #Stack as RGB: R = VV, G = VH, B = VV/VH
+        composite = ee.Image.cat([
+            vv.rename('R'),
+            vh.rename('G'),
+            ratio.rename('B')
+        ])
+        clipped_images = image_collection.map(lambda img: img.clip(rectangle_geom))
+        composite = clipped_images.median()
+    elif data_source == "Sentinel-2":
+        cloud_threshold = cloud_percentage_dropdown.value
+        image_collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+            .filterDate(start_date_ee, end_date_ee) \
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold)) \
+            .select(["B4", "B3", "B2"])
+        clipped_images = image_collection.map(lambda img: img.clip(rectangle_geom))
+        composite = clipped_images.median()
+    elif data_source == "Dynamic World":
+        image_collection = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1") \
+            .filterDate(start_date_ee, end_date_ee)
+        clipped_images = image_collection.map(lambda img: img.clip(rectangle_geom))
+        composite = clipped_images.median().select('label')
+    
+
+    if data_source == "Sentinel-2":
+            vis_params = {
+                "min": 0,
+                "max": 1500,  # Adjust max value for stretching
+                "bands": ["B4", "B3", "B2"],  # Red, Green, Blue
+                "gamma": 0.8  # Adjust gamma for better contrast
+            }
+    elif data_source == "Sentinel-1":
+            vis_params = {
+                "min": [-20, -25, 1],
+                "max": [0, -5, 10],
+                "bands": ["R", "G", "B"],
+                "gamma": 1.2
+            }
+    elif data_source == "Dynamic World":
+            vis_params = {
+                "min": 0,
+                "max": 8,
+                "palette": [
+                    '#419BDF', '#397D49', '#88B053', '#7A87C6', '#E49635', '#DFC35A', '#C4281B', '#A59B8F', '#B39FE1'
+                ]
+            }
+
+    m.addLayer(composite, vis_params, f"{data_source} - {start_date} to {end_date}")
+    
+  
+# Connect button to function
+load_image_button.on_click(load_image)
+
+# -------------------------------
+# 🔍 FUNCTION TO SELECT FEATURES BY DRAGGING A RECTANGLE
+# -------------------------------
+def select_features(b):
+    global uploaded_gdf, uploaded_df, sheet, rectangle_geom
+
+    if uploaded_gdf is None:
+        print("⚠ No CSV file has been uploaded yet.")
+        return
+ 
+
+    def handle_draw(target, action, geo_json):
+        global selected_indices, rectangle_geom
+        if uploaded_gdf is None:
+            return
+        
+        sheet.clear_selection()
+        selected_indices = []
+    # Extract bounds
+        coords = geo_json['geometry']['coordinates'][0]
+        min_lon = min(coord[0] for coord in coords)
+        max_lon = max(coord[0] for coord in coords)
+        min_lat = min(coord[1] for coord in coords)
+        max_lat = max(coord[1] for coord in coords)
+        
+        rectangle_geom = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
+        
+        # Filter and store selected indices
+        selected = uploaded_df[
+            (uploaded_df['latitude'] >= min_lat) &
+            (uploaded_df['latitude'] <= max_lat) &
+            (uploaded_df['longitude'] >= min_lon) &
+            (uploaded_df['longitude'] <= max_lon)
+        ]
+
+        selected_indices = list(selected.index)
+        for i in selected_indices:
+            sheet.select(row1=i, column1=1, clear_mode="none")
+
+    draw_control.on_draw(handle_draw)
+
+def apply_update(b):
+    new_value = new_value_text.value
+    print("Entered Value:", new_value)  # For debugging
+
+    if not new_value:
+        print("⚠ No value entered.")
+        return
+    
+    for idx in selected_indices:
+        sheet.set_cell_value_by_index("status", idx, new_value)
+
+
+
+# Button to apply the update
+apply_update_button = widgets.Button(
+    description="✏️ Update Selected",
+    button_style="warning"
+)
+
+apply_update_button.on_click(apply_update)
+def clear_selection(b):
+    global sheet, selected_indices
+
+    # Remove all drawn layers from the map
+    draw_control.clear()
+    sheet.clear_selection()
+    selected_indices = []
+clear_selection_button = widgets.Button(description="🧹 Clear Selection", button_style="info")
+clear_selection_button.on_click(clear_selection)
+
+
+# Dropdown input for new value
+new_value_text = widgets.Dropdown(
+    options=["Positive", "False Positive", "Unverified"],
+    description='New Status:',
+    value=None,  # Default value
+    disabled=False
+)
+
+
+select_features_button.on_click(select_features)
+
+# 🔹 Cloud Percentage Dropdown (0–50 by 5)
+cloud_percentage_dropdown = widgets.Dropdown(
+    options=[i for i in range(0, 55, 5)],
+    value=25,
+    description='☁ Cloud %:',
+    disabled=False
+)
+cloud_percentage_dropdown.layout.display = 'block'  # Show by default for Sentinel-2
+
+# 🔁 Toggle cloud slider visibility based on imagery selection
+def update_cloud_widget_visibility(change):
+    if change['new'] == 'Sentinel-2':
+        cloud_percentage_dropdown.layout.display = 'block'
+    else:
+        cloud_percentage_dropdown.layout.display = 'none'
+
+image_dropdown.observe(update_cloud_widget_visibility, names='value')
+
+# -------------------------------
+# 🖥️ DISPLAY UI ELEMENTS
+# -------------------------------
+
+# Group widgets into sections
+file_upload_section1 = widgets.VBox([file_upload])
+file_upload_section2 = widgets.HBox([load_button, open_table_button])
+file_upload_section3 = widgets.VBox([save_export_button])
+file_upload_section4 = widgets.VBox([table_output])
+file_upload_section = widgets.VBox([file_upload_section1,file_upload_section2,file_upload_section3,file_upload_section4])
+imagery_section = widgets.VBox([image_label, image_dropdown,cloud_percentage_dropdown, start_date_picker, end_date_picker, load_image_button])
+feature_selection_section = widgets.HBox([select_features_button, clear_selection_button, new_value_text, apply_update_button])
+
+# Create Tabs for better organization
+tab = widgets.Tab(children=[file_upload_section, imagery_section])
+tab.set_title(0, "📂 File Upload")
+tab.set_title(1, "🛰️ Image Selection")
+
+# Main control panel layout
+control_panel = widgets.VBox([title, tab, feature_selection_section])  # Add feature selection section
+
+# Display UI and Map
+display(control_panel)
+display(m)
